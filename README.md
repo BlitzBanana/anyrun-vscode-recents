@@ -6,18 +6,20 @@ Plugin for anyrun to show recently opened projects with VSCode.
 ```
 // <Anyrun config dir>/vscode.ron
 Config(
-  command: Some("code"),
-  icon: Some("com.visualstudio.code"),
-  path: Some("~/.config/Code/User/workspaceStorage"),
+  prefix: ":code",
+  command: "code",
+  icon: "com.visualstudio.code",
+  workspace: "~/.config/Code/User/workspaceStorage",
 )
 ```
 ### For Codium
 ```
 // <Anyrun config dir>/vscode.ron
 Config(
-  command: Some("codium"),
-  icon: Some("vscodium"),
-  path: Some("~/.config/VSCodium/User/workspaceStorage"),
+  prefix: ":codium",
+  command: "codium",
+  icon: "vscodium",
+  workspace: "~/.config/VSCodium/User/workspaceStorage",
 )
 ```
 
