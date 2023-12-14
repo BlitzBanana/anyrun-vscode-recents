@@ -6,24 +6,59 @@ use std::collections::HashSet;
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::process::Command;
+use thiserror::Error;
+
+#[derive(Deserialize, Default)]
+struct ConfigPrefix(Option<String>);
 
 #[derive(Deserialize)]
-pub struct Config {
-    prefix: String,
-    command: String,
-    icon: String,
-    workspace: String,
+struct ConfigCommand(String);
+
+#[derive(Deserialize)]
+struct ConfigIcon(String);
+
+#[derive(Deserialize)]
+struct ConfigWorkspace(String);
+
+impl Default for ConfigCommand {
+    fn default() -> Self {
+        Self("code".to_owned())
+    }
 }
 
-impl Default for Config {
+impl Default for ConfigIcon {
     fn default() -> Self {
-        Self {
-            prefix: ":code".to_string(),
-            command: "code".to_string(),
-            icon: "com.visualstudio.code".to_string(),
-            workspace: "~/.config/Code/User/workspaceStorage".to_string(),
-        }
+        Self("com.visualstudio.code".to_owned())
     }
+}
+
+impl Default for ConfigWorkspace {
+    fn default() -> Self {
+        Self("~/.config/Code/User/workspaceStorage".to_owned())
+    }
+}
+
+#[derive(Deserialize, Default)]
+pub struct Config {
+    #[serde(default)]
+    prefix: ConfigPrefix,
+
+    #[serde(default)]
+    command: ConfigCommand,
+
+    #[serde(default)]
+    icon: ConfigIcon,
+
+    #[serde(default)]
+    workspace: ConfigWorkspace,
+}
+
+#[derive(Error, Debug)]
+pub enum ConfigError {
+    #[error("config file not found")]
+    Io(#[from] std::io::Error),
+    #[error("config file is invalid")]
+    Ron(#[from] ron::de::SpannedError),
 }
 
 pub struct State {
@@ -38,18 +73,13 @@ struct Workspace {
 
 #[init]
 fn init(config_dir: RString) -> State {
-    let config: Config = match fs::read_to_string(format!("{}/vscode.ron", config_dir)) {
-        Ok(content) => ron::from_str(&content).unwrap_or_else(|why| {
-            eprintln!("Error parsing applications plugin config: {}", why);
-            Config::default()
-        }),
-        Err(why) => {
-            eprintln!("Error reading applications plugin config: {}", why);
-            Config::default()
-        }
-    };
+    let config: Config = fs::read_to_string(format!("{}/vscode.ron", config_dir))
+        .map_err(ConfigError::Io)
+        .and_then(|content| ron::from_str(&content).map_err(ConfigError::Ron))
+        .map_err(|err| eprintln!("{}", err))
+        .unwrap_or_default();
 
-    let base_path_str = &(config.workspace.to_owned())[..];
+    let base_path_str = &(config.workspace.0.to_owned())[..];
 
     let expanded_path = tilde(base_path_str);
     let base_path = PathBuf::from(expanded_path.into_owned());
@@ -102,19 +132,26 @@ fn get_matches(input: RString, state: &State) -> RVec<Match> {
         return RVec::new();
     }
 
-    if !input.starts_with(&state.config.prefix) {
-        return RVec::new();
+    if let ConfigPrefix(Some(prefix)) = &state.config.prefix {
+        if !input.starts_with(prefix) {
+            return RVec::new();
+        }
     }
 
-    let query = input.replace(&state.config.prefix, "");
-    let vec = state
+    let query = if let ConfigPrefix(Some(prefix)) = &state.config.prefix {
+        input.replace(prefix, "")
+    } else {
+        input.to_string()
+    };
+
+    let matches = state
         .results
         .iter()
         .filter_map(|(full, short, id)| {
             if short.contains(query.trim()) {
                 Some(Match {
                     title: format!("VSCode: {}", short).into(),
-                    icon: ROption::RSome((state.config.icon.to_owned())[..].into()),
+                    icon: ROption::RSome((state.config.icon.0.to_owned())[..].into()),
                     use_pango: false,
                     description: ROption::RSome(full[..].into()),
                     id: ROption::RSome(*id),
@@ -125,7 +162,8 @@ fn get_matches(input: RString, state: &State) -> RVec<Match> {
         })
         .take(5)
         .collect::<RVec<Match>>();
-    vec
+
+    matches
 }
 
 #[handler]
@@ -144,11 +182,12 @@ fn handler(selection: Match, state: &State) -> HandleResult {
 
     if Command::new("bash")
         .arg("-c")
-        .arg(format!("{} {}", state.config.command.to_owned(), entry))
+        .arg(format!("{} {}", state.config.command.0.to_owned(), entry))
         .spawn()
         .is_err()
     {
         eprintln!("Error running vscode");
     }
+
     HandleResult::Close
 }
