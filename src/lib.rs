@@ -1,11 +1,12 @@
 use abi_stable::std_types::{ROption, RString, RVec};
 use anyrun_plugin::*;
+use itertools::Itertools;
 use serde::Deserialize;
 use shellexpand::tilde;
-use std::collections::HashSet;
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::process::Command;
+use textdistance::str::damerau_levenshtein;
 use thiserror::Error;
 
 #[derive(Deserialize, Default)]
@@ -59,20 +60,23 @@ pub struct Config {
 
 #[derive(Error, Debug)]
 pub enum ConfigError {
-    #[error("config file not found")]
+    #[error(transparent)]
     Io(#[from] std::io::Error),
-    #[error("config file is invalid")]
+    #[error(transparent)]
     Ron(#[from] ron::de::SpannedError),
 }
 
-pub struct State {
-    results: Vec<(String, String, u64)>,
-    config: Config,
+#[derive(Error, Debug)]
+pub enum ScanError {
+    #[error(transparent)]
+    Io(#[from] std::io::Error),
+    #[error(transparent)]
+    Json(#[from] serde_json::Error),
 }
 
-#[derive(Debug, Deserialize)]
-struct Workspace {
-    folder: Option<String>,
+pub struct State {
+    results: Vec<Project>,
+    config: Config,
 }
 
 #[init]
@@ -80,46 +84,64 @@ fn init(config_dir: RString) -> State {
     let config: Config = fs::read_to_string(format!("{}/vscode.ron", config_dir))
         .map_err(ConfigError::Io)
         .and_then(|content| ron::from_str(&content).map_err(ConfigError::Ron))
-        .map_err(|err| eprintln!("{}", err))
+        .map_err(|err| eprintln!("Error parsing config: {}", err))
         .unwrap_or_default();
 
-    let base_path_str = &(config.workspace.0.to_owned())[..];
-
-    let expanded_path = tilde(base_path_str);
+    let expanded_path = tilde(&config.workspace.0);
     let base_path = PathBuf::from(expanded_path.into_owned());
 
-    let mut results: Vec<(String, String, u64)> = Vec::new();
-    let mut index: u64 = 0;
-
-    let mut already_have: HashSet<String> = HashSet::new();
-
-    if let Ok(entries) = fs::read_dir(base_path) {
-        for entry in entries.flatten() {
-            let file_path = entry.path().join("workspace.json");
-
-            if file_path.exists() && file_path.is_file() {
-                if let Ok(contents) = fs::read_to_string(&file_path) {
-                    if let Ok(parsed) = serde_json::from_str::<Workspace>(&contents) {
-                        if let Some(folder_tmp) = parsed.folder {
-                            let folder = Path::new(&folder_tmp);
-
-                            let full_path = folder_tmp.replace("file://", "");
-                            let shortcut =
-                                folder.file_name().unwrap().to_str().unwrap().to_string();
-
-                            if !already_have.contains(&full_path) {
-                                already_have.insert(full_path.clone());
-                                results.push((full_path, shortcut, index));
-                                index += 1;
-                            }
-                        }
-                    }
-                }
-            }
-        }
-    }
+    let results = scan_workspaces(&base_path)
+        .map_err(|err| eprintln!("Error listing vscode projects: {}", err))
+        .map(|projects| {
+            projects
+                .into_iter()
+                .unique_by(|p| p.fullpath.clone())
+                .collect::<Vec<_>>()
+        })
+        .unwrap_or_default();
 
     State { results, config }
+}
+
+#[derive(Debug, Deserialize)]
+struct Workspace {
+    folder: String,
+}
+
+#[derive(Debug)]
+struct Project {
+    index: u64,
+    fullpath: String,
+    shortname: String,
+}
+
+fn scan_workspaces(path: &PathBuf) -> Result<Vec<Project>, ScanError> {
+    fs::read_dir(path)
+        .map_err(ScanError::Io)
+        .map(|entries| entries.flatten())?
+        .map(|entry| entry.path().join("workspace.json"))
+        .filter(|path| path.exists() && path.is_file())
+        .enumerate()
+        .map(|(index, path)| scan_workspace(&path, index as u64))
+        .filter(|res| res.is_ok())
+        .collect()
+}
+
+fn scan_workspace(path: &PathBuf, index: u64) -> Result<Project, ScanError> {
+    fs::read_to_string(path)
+        .map_err(ScanError::Io)
+        .map(|content| serde_json::from_str::<Workspace>(&content).map_err(ScanError::Json))?
+        .map(|ws| {
+            let folder = Path::new(&ws.folder);
+            let fullpath = ws.folder.replace("file://", "");
+            let shortname = folder.file_name().unwrap().to_str().unwrap().to_string();
+
+            Project {
+                index,
+                fullpath,
+                shortname,
+            }
+        })
 }
 
 #[info]
@@ -151,19 +173,21 @@ fn get_matches(input: RString, state: &State) -> RVec<Match> {
     let matches = state
         .results
         .iter()
-        .filter_map(|(full, short, id)| {
-            if short.contains(query.trim()) {
+        .map(|project| {
+            (
+                damerau_levenshtein(&query, &project.shortname),
                 Some(Match {
-                    title: format!("VSCode: {}", short).into(),
+                    title: format!("VSCode: {}", project.shortname).into(),
                     icon: ROption::RSome((state.config.icon.0.to_owned())[..].into()),
                     use_pango: false,
-                    description: ROption::RSome(full[..].into()),
-                    id: ROption::RSome(*id),
-                })
-            } else {
-                None
-            }
+                    description: ROption::RSome(project.fullpath[..].into()),
+                    id: ROption::RSome(project.index),
+                }),
+            )
         })
+        .sorted_by(|a, b| Ord::cmp(&b.0, &a.0))
+        .rev()
+        .flat_map(|i| i.1)
         .take(5)
         .collect::<RVec<Match>>();
 
@@ -175,9 +199,9 @@ fn handler(selection: Match, state: &State) -> HandleResult {
     let entry = state
         .results
         .iter()
-        .find_map(|(full, _short, id)| {
-            if *id == selection.id.unwrap() {
-                Some(full)
+        .find_map(|project| {
+            if project.index == selection.id.unwrap() {
+                Some(project.fullpath.clone())
             } else {
                 None
             }
