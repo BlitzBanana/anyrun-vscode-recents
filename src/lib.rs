@@ -9,15 +9,19 @@ use std::process::Command;
 use thiserror::Error;
 
 #[derive(Deserialize, Default)]
+#[serde(transparent)]
 struct ConfigPrefix(Option<String>);
 
 #[derive(Deserialize)]
+#[serde(transparent)]
 struct ConfigCommand(String);
 
 #[derive(Deserialize)]
+#[serde(transparent)]
 struct ConfigIcon(String);
 
 #[derive(Deserialize)]
+#[serde(transparent)]
 struct ConfigWorkspace(String);
 
 impl Default for ConfigCommand {
