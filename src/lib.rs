@@ -6,7 +6,7 @@ use shellexpand::tilde;
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::process::Command;
-use textdistance::str::damerau_levenshtein;
+use textdistance::str::jaro_winkler;
 use thiserror::Error;
 
 #[derive(Deserialize, Default)]
@@ -174,19 +174,18 @@ fn get_matches(input: RString, state: &State) -> RVec<Match> {
         .results
         .iter()
         .map(|project| {
-            (
-                damerau_levenshtein(&query, &project.shortname),
-                Some(Match {
-                    title: format!("VSCode: {}", project.shortname).into(),
-                    icon: ROption::RSome((state.config.icon.0.to_owned())[..].into()),
-                    use_pango: false,
-                    description: ROption::RSome(project.fullpath[..].into()),
-                    id: ROption::RSome(project.index),
-                }),
-            )
+            let distance = jaro_winkler(&query.to_lowercase(), &project.shortname.to_lowercase());
+            let distance = (distance * 100.) as i32;
+            let matched = Match {
+                title: format!("VSCode: {}", project.shortname).into(),
+                icon: ROption::RSome((state.config.icon.0.to_owned())[..].into()),
+                use_pango: false,
+                description: ROption::RSome(project.fullpath[..].into()),
+                id: ROption::RSome(project.index),
+            };
+            (distance, Some(matched))
         })
         .sorted_by(|a, b| Ord::cmp(&b.0, &a.0))
-        .rev()
         .flat_map(|i| i.1)
         .take(5)
         .collect::<RVec<Match>>();
