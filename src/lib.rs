@@ -3,6 +3,7 @@ use anyrun_plugin::*;
 use itertools::Itertools;
 use serde::Deserialize;
 use shellexpand::tilde;
+use std::fmt::Debug;
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::process::Command;
@@ -113,6 +114,7 @@ struct Project {
     index: u64,
     fullpath: String,
     shortname: String,
+    modified: String,
 }
 
 fn scan_workspaces(path: &PathBuf) -> Result<Vec<Project>, ScanError> {
@@ -135,11 +137,17 @@ fn scan_workspace(path: &PathBuf, index: u64) -> Result<Project, ScanError> {
             let folder = Path::new(&ws.folder);
             let fullpath = ws.folder.replace("file://", "");
             let shortname = folder.file_name().unwrap().to_str().unwrap().to_string();
+            let modified = {
+                let parent = path.parent().unwrap();
+                let meta = fs::metadata(parent).unwrap();
+                format!("{:?}", meta.modified())
+            };
 
             Project {
                 index,
                 fullpath,
                 shortname,
+                modified,
             }
         })
 }
@@ -183,10 +191,11 @@ fn get_matches(input: RString, state: &State) -> RVec<Match> {
                 description: ROption::RSome(project.fullpath[..].into()),
                 id: ROption::RSome(project.index),
             };
-            (distance, Some(matched))
+            (Some(matched), distance, project.modified.clone())
         })
-        .sorted_by(|a, b| Ord::cmp(&b.0, &a.0))
-        .flat_map(|i| i.1)
+        .sorted_unstable_by_key(|item| (item.1, item.2.clone()))
+        .rev()
+        .flat_map(|i| i.0)
         .take(5)
         .collect::<RVec<Match>>();
 
